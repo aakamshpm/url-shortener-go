@@ -170,13 +170,17 @@ func redirectHandler(w http.ResponseWriter, r *http.Request, st *store) {
 	// eg: returns abc123 from /abc123
 	code := strings.TrimPrefix(r.URL.Path, "/")
 
-	if v, ok := st.Get(code); ok {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "value: %s\n", v)
+	if code == "" {
+		http.NotFound(w, r) // if the url is "/", return 404
+	}
+
+	longURL, ok := st.Get(code)
+	if !ok {
+		http.NotFound(w, r)
 		return
 	}
 
-	http.NotFound(w, r)
+	http.Redirect(w, r, longURL, http.StatusFound) // 302
 }
 
 func encodeBase62(n uint64) string {
@@ -191,7 +195,7 @@ func encodeBase62(n uint64) string {
 	for n > 0 {
 		rem := n % baseLen             // 1_000_001 % 62 would give 1 as remainder
 		out = append(out, base62[rem]) // take the base62 character based on remainder
-		n = n / baseLen                // 1_000_001 / 62 = 16.129
+		n = n / baseLen                // 1_000_001 / 62 = 16,129
 	}
 
 	// the values in 'out' would be in least-significant first order

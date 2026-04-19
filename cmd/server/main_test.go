@@ -71,3 +71,48 @@ func TestShortenHandler_MethodNotAllowed(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 	}
 }
+
+func TestRedirectHandler_Found(t *testing.T) {
+	st := newStore(1_000_000)
+	st.Save("abc123", "https://example.com/docs")
+	req := httptest.NewRequest(http.MethodGet, "/abc123", nil)
+	rec := httptest.NewRecorder()
+	redirectHandler(rec, req, st)
+	res := rec.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusFound { // 302
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusFound)
+	}
+	gotLocation := res.Header.Get("Location")
+	wantLocation := "https://example.com/docs"
+	if gotLocation != wantLocation {
+		t.Fatalf("Location = %q, want %q", gotLocation, wantLocation)
+	}
+}
+func TestRedirectHandler_UnknownCode(t *testing.T) {
+	st := newStore(1_000_000)
+	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
+	rec := httptest.NewRecorder()
+	redirectHandler(rec, req, st)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+func TestRedirectHandler_RootPath(t *testing.T) {
+	st := newStore(1_000_000)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	redirectHandler(rec, req, st)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+func TestRedirectHandler_MethodNotAllowed(t *testing.T) {
+	st := newStore(1_000_000)
+	req := httptest.NewRequest(http.MethodPost, "/abc123", nil)
+	rec := httptest.NewRecorder()
+	redirectHandler(rec, req, st)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
