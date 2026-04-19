@@ -75,7 +75,7 @@ func main() {
 
 	// catch all route for GET (/{code})
 	// redirects short urls accoridingly
-	mux.HandleFunc("/", redirectHandler)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { redirectHandler(w, r, st) })
 
 	addr := ":8080"
 
@@ -107,6 +107,16 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, st *store, rng *rand
 		return
 	}
 
+	// ensure no extra JSON tokens exist aftet the first one which is "url"
+	var extra any
+	if err := dec.Decode(&extra); err != nil {
+		// EOF here means no extra token, which is valid
+		if err.Error() != "EOF" {
+			http.Error(w, "invalid JSON body; only one JSON object is allowed", http.StatusBadRequest)
+			return
+		}
+	}
+
 	req.URL = strings.TrimSpace(req.URL)
 	if req.URL == "" {
 		http.Error(w, "url is required", http.StatusBadRequest)
@@ -120,6 +130,11 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, st *store, rng *rand
 	}
 
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		http.Error(w, "url must start with http:// or https://", http.StatusBadRequest)
+		return
+	}
+
+	if parsed.Host == "" {
 		http.Error(w, "url host is required", http.StatusBadRequest)
 		return
 	}
@@ -127,6 +142,9 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, st *store, rng *rand
 	// counter based short code generation
 	id := st.NextID()
 	code := encodeBase62(id)
+
+	// save mapping
+	st.Save(code, req.URL)
 
 	resp := shortenResponse{
 		Code:     code,
@@ -143,7 +161,7 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, st *store, rng *rand
 	}
 }
 
-func redirectHandler(w http.ResponseWriter, r *http.Request) {
+func redirectHandler(w http.ResponseWriter, r *http.Request, st *store) {
 	// make sure the request is GET
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -154,13 +172,13 @@ func redirectHandler(w http.ResponseWriter, r *http.Request) {
 	// eg: returns abc123 from /abc123
 	code := strings.TrimPrefix(r.URL.Path, "/")
 
-	if code == "" {
-		http.NotFound(w, r) // if the url is "/", return 404
+	if v, ok := st.Get(code); ok {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "value: %s\n", v)
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "todo redirect for code: %s\n", code)
+	http.NotFound(w, r)
 }
 
 func encodeBase62(n uint64) string {
