@@ -3,15 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	neturl "net/url"
 	"os"
 	"strings"
 	"sync"
-	"time"
 )
 
 const (
@@ -48,8 +47,8 @@ func (s *store) Save(code, longUrl string) {
 }
 
 func (s *store) Get(code string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	v, ok := s.data[code]
 	return v, ok
@@ -64,13 +63,12 @@ func (s *store) NextID() uint64 {
 }
 
 func main() {
-	rng := rand.New(rand.NewSource(time.Now().UnixNano())) // used later to create short codes
-	st := newStore(1_000_000)                              // start the counter value at 1_000_000 for non-trivial short codes.
+	st := newStore(1_000_000) // start the counter value at 1_000_000 for non-trivial short codes.
 	mux := http.NewServeMux()
 
 	// route handling for POST /shorten
 	mux.HandleFunc("/shorten", func(w http.ResponseWriter, r *http.Request) {
-		shortenHandler(w, r, st, rng)
+		shortenHandler(w, r, st)
 	})
 
 	// catch all route for GET (/{code})
@@ -91,7 +89,9 @@ func main() {
 	}
 }
 
-func shortenHandler(w http.ResponseWriter, r *http.Request, st *store, rng *rand.Rand) {
+func shortenHandler(w http.ResponseWriter, r *http.Request, st *store) {
+	defer r.Body.Close() // body cleanup
+
 	// make sure method is POST
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -109,12 +109,10 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, st *store, rng *rand
 
 	// ensure no extra JSON tokens exist aftet the first one which is "url"
 	var extra any
-	if err := dec.Decode(&extra); err != nil {
-		// EOF here means no extra token, which is valid
-		if err.Error() != "EOF" {
-			http.Error(w, "invalid JSON body; only one JSON object is allowed", http.StatusBadRequest)
-			return
-		}
+	// EOF here means no extra token, which is valid
+	if err := dec.Decode(&extra); err != io.EOF {
+		http.Error(w, "invalid JSON body; only one JSON object is allowed", http.StatusBadRequest)
+		return
 	}
 
 	req.URL = strings.TrimSpace(req.URL)
