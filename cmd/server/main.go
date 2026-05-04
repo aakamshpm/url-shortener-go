@@ -2,20 +2,15 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	neturl "net/url"
 	"os"
 	"strings"
-	"sync"
-)
 
-const (
-	baseURL = "http://localhost:8080"
-	base62  = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	"github.com/aakamshpm/url-shortener-go/internal/shortener"
+	"github.com/aakamshpm/url-shortener-go/internal/storage/memory"
 )
 
 type shortenRequest struct {
@@ -27,53 +22,20 @@ type shortenResponse struct {
 	ShortURL string `json:"short_url"`
 }
 
-type store struct {
-	mu      sync.RWMutex
-	data    map[string]string // code -> longUrl
-	counter uint64
-}
-
-func newStore(start uint64) *store {
-	return &store{
-		data:    make(map[string]string),
-		counter: start,
-	}
-}
-
-func (s *store) Save(code, longUrl string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.data[code] = longUrl
-}
-
-func (s *store) Get(code string) (string, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	v, ok := s.data[code]
-	return v, ok
-}
-
-func (s *store) NextID() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.counter++
-	return s.counter
-}
-
 func main() {
-	st := newStore(1_000_000) // start the counter value at 1_000_000 for non-trivial short codes.
+	mem := memory.NewStore(1_000_000) // start the counter value at 1_000_000 for non-trivial short codes.
+	svc := shortener.NewService(mem)
+
 	mux := http.NewServeMux()
 
 	// route handling for POST /shorten
 	mux.HandleFunc("/shorten", func(w http.ResponseWriter, r *http.Request) {
-		shortenHandler(w, r, st)
+		shortenHandler(w, r, svc)
 	})
 
 	// catch all route for GET (/{code})
 	// redirects short urls accoridingly
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { redirectHandler(w, r, st) })
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { redirectHandler(w, r, svc) })
 
 	addr := ":8080"
 
@@ -89,7 +51,7 @@ func main() {
 	}
 }
 
-func shortenHandler(w http.ResponseWriter, r *http.Request, st *store) {
+func shortenHandler(w http.ResponseWriter, r *http.Request, svc *shortener.Service) {
 	defer r.Body.Close() // body cleanup
 
 	// make sure method is POST
@@ -109,44 +71,26 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, st *store) {
 
 	// ensure no extra JSON tokens exist aftet the first one which is "url"
 	var extra any
+
 	// EOF here means no extra token, which is valid
 	if err := dec.Decode(&extra); err != io.EOF {
 		http.Error(w, "invalid JSON body; only one JSON object is allowed", http.StatusBadRequest)
 		return
 	}
 
-	req.URL = strings.TrimSpace(req.URL)
-	if req.URL == "" {
-		http.Error(w, "url is required", http.StatusBadRequest)
-		return
-	}
-
-	parsed, err := neturl.ParseRequestURI(req.URL)
+	code, shortURL, err := svc.Shorten(req.URL)
 	if err != nil {
-		http.Error(w, "invalid url format", http.StatusBadRequest)
-		return
+		switch err {
+		case shortener.ErrEmptyURL, shortener.ErrInvalidScheme, shortener.ErrInvalidURL, shortener.ErrMissingHost:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		default:
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
 	}
-
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		http.Error(w, "url must start with http:// or https://", http.StatusBadRequest)
-		return
-	}
-
-	if parsed.Host == "" {
-		http.Error(w, "url host is required", http.StatusBadRequest)
-		return
-	}
-
-	// counter based short code generation
-	id := st.NextID()
-	code := encodeBase62(id)
-
-	// save mapping
-	st.Save(code, req.URL)
 
 	resp := shortenResponse{
 		Code:     code,
-		ShortURL: fmt.Sprintf("%s/%s", baseURL, code),
+		ShortURL: shortURL,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -159,7 +103,7 @@ func shortenHandler(w http.ResponseWriter, r *http.Request, st *store) {
 	}
 }
 
-func redirectHandler(w http.ResponseWriter, r *http.Request, st *store) {
+func redirectHandler(w http.ResponseWriter, r *http.Request, svc *shortener.Service) {
 	// make sure the request is GET
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -174,35 +118,11 @@ func redirectHandler(w http.ResponseWriter, r *http.Request, st *store) {
 		http.NotFound(w, r) // if the url is "/", return 404
 	}
 
-	longURL, ok := st.Get(code)
+	longURL, ok := svc.Resolve(code)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
 
 	http.Redirect(w, r, longURL, http.StatusFound) // 302
-}
-
-func encodeBase62(n uint64) string {
-	if n == 0 {
-		return string(base62[0])
-	}
-
-	baseLen := uint64(len(base62)) //62
-	out := make([]byte, 0, 11)     // uint64 in base62 fits within 11 characters
-
-	// convert the uint64 value to its base62 representation
-	for n > 0 {
-		rem := n % baseLen             // 1_000_001 % 62 would give 1 as remainder
-		out = append(out, base62[rem]) // take the base62 character based on remainder
-		n = n / baseLen                // 1_000_001 / 62 = 16,129
-	}
-
-	// the values in 'out' would be in least-significant first order
-	// to get the proper base62 representation, we would need to reverse the characters/elements in array
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-
-	return string(out)
 }
